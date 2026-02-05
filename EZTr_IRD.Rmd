@@ -1,0 +1,1942 @@
+---
+title: "Leasyscan analysis IRD"
+author: "Laura Gregoire"
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+###  Stage 0 : parameters to define before analysis
+#### packages , working directories, path 
+
+```{r working directory}
+rm(list = ls())
+path <- readline(prompt = "Define working directory. Required format C:/Users/.../: ") 
+#example "C:/Users/2021lg003/Documents/DEMO_KAR_IRD_SG_2025"
+path <- gsub('^"|"$', '', path) 
+setwd(dir = path)
+cat("Working directory set to:", getwd(), "\n")
+
+```
+
+```{r package and functions, echo=FALSE, message=FALSE, warning=FALSE}
+
+# ----------------------
+# Load packages 
+# ----------------------
+
+# Define required packages 
+required_packages <- unique(c(
+  "readxl", "hms", "xts", "dplyr", "mgcv", "PerformanceAnalytics",
+  "wavelets", "signal", "tidyverse", "zoo", "h2o", "sqldf", "ggplot2",
+  "plyr", "lubridate", "plantecophys", "highfrequency", "stringr",
+  "chron", "nonlinearTseries", "tsfeatures", "splitstackshape",
+  "psych", "fixr", "SpATS", "reshape2", "tidyr", "nlme", "locfit",
+  "gss", "factoextra", "gridExtra", "statgenHTP", "magick",
+  "segmented", "MASS", "rstatix", "statgenSTA", "berryFunctions",
+  "future"
+))
+
+# Install and load anyLib if necessary
+if (!requireNamespace("anyLib", quietly = TRUE)) {
+  install.packages("anyLib")
+} 
+library(anyLib)
+
+# Install and load all required packages
+invisible(anyLib(required_packages))
+# ----------------------
+# Load R functions
+# ----------------------
+
+# Define project root and functions directory
+project_root <- getwd()
+functions_dir <- file.path(project_root, "functions")
+
+
+# Identify all R scripts in functions 
+function_scripts <- list.files(
+  path = functions_dir,
+  pattern = "\\.R$",
+  full.names = TRUE
+)
+
+invisible(
+  lapply(function_scripts, source)
+)
+
+
+print("All packages and functions successfully loaded")
+
+
+```
+
+```{r Define path to store results}
+
+opPATH.obj= "./saved_objects/"
+if (!dir.exists(opPATH.obj)) dir.create(opPATH.obj, recursive = TRUE)
+
+opPATH <- "./results/"
+if (!dir.exists(opPATH)) dir.create(opPATH, recursive = TRUE)
+
+
+opPATH.raw="./results/Features_ETr/"  # features of profile of ETr with outliers removed and missing data interpolated, but not smooth and not normalized
+if (!dir.exists(opPATH.raw)) dir.create(opPATH.raw, recursive = TRUE)
+
+opPATH.rawLA="./results/Features_ETr_normalized_LA/"# features of profile of ETr with outliers removed and missing data interpolated normalized by leaf area 
+if (!dir.exists(opPATH.rawLA)) dir.create(opPATH.rawLA, recursive = TRUE)
+
+opPATH.smth="./results/Features_ETr_smooth/"  # features of profile of ETr with outliers removed and missing data interpolated, smoothed but not normalized 
+if (!dir.exists(opPATH.smth)) dir.create(opPATH.smth, recursive = TRUE)
+
+opPATH.smthLA="./results/Features_ETr_smooth_normalized_LA/"  # features of profile of ETr with outliers removed and missing data interpolated, smoothed and  normalized by Leaf area
+if (!dir.exists(opPATH.smthLA)) dir.create(opPATH.smthLA, recursive = TRUE)
+
+opPATH.profile="./results/profile/"
+if (!dir.exists(opPATH.profile)) dir.create(opPATH.profile, recursive = TRUE)
+
+
+
+
+```
+
+```{r define files path}
+print("define file paths and names. Input files for loadcell weights, climate data and metadata are mandatory. others are experiment and platform-dependent. (if the file is missing, press enter ) ")
+
+metad_file <- readline(prompt = "Define path to metadata file: ") 
+m_lc_file <- readline(prompt = "Define path to loadcell file: ") 
+climate_file <- readline(prompt = "Define path to climate file: ") 
+planimeter_file = readline(prompt = "Define path to planimeter file: ") 
+
+ # for metad_file : "./data/meta.d_raw.csv"
+# for m_lc_file : "./data/m.lc_raw.csv"
+# for climate_file : "./data/climate_raw.csv"
+# for planimeter_file : "./data/LEAF_AREA_BIOMASS_BATCH1.csv"
+
+
+metad_file_path = paste0(path,metad_file)
+metad_file_path = gsub('/\".', '',metad_file_path )
+metad_file_path = gsub('\"','',metad_file_path )
+
+m_lc_file_path = paste0(path,m_lc_file)
+m_lc_file_path = gsub('/\".', '',m_lc_file_path )
+m_lc_file_path = gsub('\"','',m_lc_file_path )
+
+climate_file_path = paste0(path,climate_file)
+climate_file_path = gsub('/\".', '',climate_file_path )
+climate_file_path = gsub('\"','',climate_file_path )
+
+```
+#### create working files (metadata, loadcell data, weather data, planimeter)
+
+```{r Create meta.d}
+### Create meta.d ###
+print("Load metadata file")
+meta.d <- read.csv(metad_file_path, sep = ";")
+meta.d <- distinct(meta.d) #
+meta.d = meta.d[,c("unit", "old_unit", "Experiment", "Treatment","Species","Genotype","G..Alias", "Replicates")]
+str(meta.d)
+
+print("The result here should be : unit (chr), old_unit(chr), Experiment (chr), Treatment (chr),Species (chr),Genotype (chr  or int),G..Alias(chr or int), Replicates (int). Is it good? ")
+
+write.csv(meta.d, paste0(path, "./data/meta.d.csv"))
+save(meta.d, file = paste0(path, "./data/meta.d.RData"))
+load(file = paste0(path,  "./data/meta.d.RData"))
+```
+
+```{r Create m.lc}
+
+print("Load the loadcell weight measurement file. Be careful with m.lc$timestamp format")
+ m.lc <- read.csv( m_lc_file_path, sep = ";") ## be aware that the separator can change , or ; or ... ? 
+if (!"timestamp" %in% colnames(m.lc)) {
+  m.lc$timestamp <- m.lc$Timestamp
+}
+
+if (!"unit" %in% colnames(m.lc)) {
+m.lc$unit =   paste0(m.lc$Row, "_", m.lc$Column)
+  } 
+
+if (!"Weight_g" %in% colnames(m.lc)) {
+  m.lc$Weight_g <- m.lc$Weight.g
+}
+ 
+ if (("Date" %in% colnames(m.lc)) && ("Hour" %in% colnames(m.lc))) {
+  m.lc$Date <- ymd(m.lc$Date) ## be aware that the format can change ymd, dmy... based on platform
+m.lc$timestamp= as.POSIXct(paste( m.lc$Date, m.lc$Hour, tz= "utc"))
+} 
+head(m.lc$timestamp) # check the date/time format from head(m.lc) and run ymd_hms/dmy_hm
+m.lc$timestamp <- as.POSIXct( #Format # if different adapt to proposed format d: day, m:month, y: year, h:hour, m: miprint("The format here should be YYYY-MM-DD HH:MM:SS UTC/CEST" )
+  m.lc$timestamp,
+  format = "%Y.%m.%d %H:%M",
+  tz = "UTC"   # be careful of timezonz, must be consistent across all TS used
+)
+ 
+head(m.lc$timestamp)
+
+new.lc<-as.data.frame(matrix(nrow = nrow(m.lc), ncol = 4))
+new.lc[,1] <- m.lc$timestamp
+new.lc[,2] = m.lc$unit 
+new.lc[,3] = m.lc$Row 
+# new.lc[,3] = str_replace_all(new.lc[,3], "B-","")
+new.lc[,4]= m.lc$Weight_g
+colnames(new.lc) = c("timestamp",	"unit",	"Row",	"Weight_g")
+
+str(new.lc)
+
+```
+#### define interval between measurements
+
+```{r define time interval}
+seq_by <- readline(prompt = "Enter desired time (in min) interval, e.g. 15/30/45/60 between measurements : ")  # example  30
+seq_by=as.numeric(seq_by)
+cat("Time interval between measurements is  :",seq_by, "minutes ")
+```
+
+```{r merge using unit format}
+print("The next step is to merge the metadata with the loacell file, using the “unit” column in both files." )
+
+unique(head(meta.d$unit))
+unique(new.lc$unit)[1:6]
+
+print("Do the first units have the same name in the meta.d and m.lc files?")
+```
+
+
+```{r merge metadata and load cell data }
+## merge metadata and load cell data 
+new.lc$genotype = NA
+new.lc$g_alias =NA
+new.lc$treatment =NA
+
+## This loop can be long, so run it once, then if you need to come back, don't hesitate to load the next object to save time. 
+for (i in 1:nrow(new.lc)) {
+  r.ind <- which(meta.d$unit == new.lc$unit[i])
+  if (length(r.ind) == 0) next  
+  new.lc$genotype[i] <- unique(meta.d$Genotype[r.ind])
+  new.lc$g_alias[i] <- unique(meta.d$G..Alias[r.ind])
+  new.lc$treatment[i] <- unique(meta.d$Treatment[r.ind])
+  if (i %% 100 == 0) cat("row : ", i, "\n")  # avoid froze screen
+}
+
+
+m.lc <- new.lc
+
+str(m.lc)
+print("The result here should be :timestamp (POSIXct),unit (chr),Row (chr),Weight_g (num),genotype (chr or int),g_alias (chr or int),treatment(chr). Is it good? ")
+
+
+write.csv(m.lc, paste0(path, "./data/m.lc.csv"))
+save(m.lc, file = paste0(path, "./data/m.lc.RData"))
+load(file = paste0(path, "./data/m.lc.RData"))
+```
+
+#### define start - end of experiment 
+
+```{r define first date}
+fdt <- readline(prompt = "Enter FIRST DATE of experiment (required format: YYYY-MM-DD): ") #day after depot on Lc  2025-05-20 
+firstDate=as.Date(as.character(fdt)) 
+cat(paste0("the start date of the experiment is :",as.Date(as.character(fdt))))
+
+```
+
+```{r define last date}
+# NOTE 1:  the next steps will "cut" this day of measurement 
+ldt <- readline(prompt = "Enter LAST DATE of experiment (required format: YYYY-MM-DD): ") # example  2025-06-09 
+lastDate=as.Date(as.character(ldt)) 
+cat(paste0("the end date of the experiment is :",as.Date(as.character(ldt))))
+
+```
+#### define average weight on the loadcell
+
+
+```{r define average weight}
+
+avg_wgt <- readline(prompt = "Enter an expected weight, in g, just a rough estimate: ") # example 4200
+avg_wgt=as.numeric(avg_wgt)
+cat("The expected weight on a loadcell is roughly : ",avg_wgt, "g ")
+```
+
+#### define days to exclude ie. irrigation days
+```{r define irrigation days}
+## Irrigation dates 
+print("Enter irrigation days. See comments for more info")
+
+# NOTE 1: Enter date(s) of irrigation or when data is extremely noisy.
+# NOTE 2: If no such date, enter LAST DATE of experiment
+# NOTE 3: The entire date will be erased: in the case of evening irrigation, it may not be necessary to erase the entire date. This will depend on the quantity and quality of your data.
+irrg.dts <- readline(prompt = "Enter irrigation days (required format : c(YYYY-MM-DD, ... ) : ") 
+
+#EXEMPLE CANOPY VS IND : 
+# c("2025-06-09 ")
+irrg.dts <- gsub('c\\(\\"|\\")', '', irrg.dts)
+irrg.dts <- as.Date(irrg.dts)
+
+# remove 'c('  ')' "" \
+irrg.dts <- gsub("^c\\(|\\)$", "", irrg.dts)
+irrg.dts <- gsub("\"", "", irrg.dts)
+irrg.dts <- gsub(" ", "", irrg.dts)
+irrg.dts <- unlist(strsplit(irrg.dts, split = ","))
+
+
+cat("The irrigation days or noisy days that need to be removed are :"  ,irrg.dts, "(or last day of experience if none)")
+
+
+
+
+
+
+```
+
+```{r date 1 and 2}
+## Date 1 and 2 : format "YYYY-MM-DD HH:MM:SS"
+Date1 = paste(as.character(firstDate) , "00:00:00")
+Date2 = paste(as.character(lastDate), "23:30:00")
+Date1<-ymd_hms(Date1)  
+Date2<-ymd_hms(Date2)
+Date1
+Date2
+dates <- seq(Date1, Date2, by="15 mins")
+print("The format should be YYYY-MM-DD HH:MM:SS UTC. Is it correct?")
+
+```
+
+```{r  load climate data}
+### Create Climate data ###
+print("Load climatic data. They differ according to the measurement platforms (IRD/ICRISAT). More information in comments")
+# NOTE 1 : On the ICRISAT platform, we have climatic data from various sensors that are not adapted to the 15min format, such as LC weighings. The first step is therefore to adapt these data to the 15-minute format, and to merge the data from several sensors into a single dataframe. 
+#  In the case of another platform such as IRD PLATFORM, this problem is absent.
+
+
+platform <- readline(prompt = "What platform are you using ? Required : IRD or ICRISAT  : ") 
+if ((platform ==  "ICRISAT") == TRUE) {
+  m_lc_file_path
+  clm.df <- read.csv(climate_file_path)
+sensor.unit.df <- read.csv(sensor_file_path)
+
+clm.df.mapped <- clm.df[clm.df$sensor %in% sensor.unit.df$sensor, ]
+unq.clm.var <- unique(clm.df.mapped$variable)
+
+
+# "Temperature (Deg C)" : unq.clm.var[1]
+temperature.DF <-  subset(clm.df.mapped, variable == unq.clm.var[1])
+temperature.DF$timestamp = ymd_hms(temperature.DF$timestamp)
+temperature.DF$timestamp <-   floor_date(temperature.DF$timestamp , "15 minutes")
+# create empty dataframe to store all values
+temp_df =   as.data.frame(matrix(nrow = length(unique(temperature.DF$timestamp)), 
+                                  ncol = 2))
+colnames(temp_df) =c("value","timestamp")
+temp_df$value = as.numeric(temp_df$value)
+temp_df$timestamp = as.POSIXct(temp_df$value)
+
+
+for (i in 1:length( unique(temperature.DF$timestamp))) {
+  subset_timestamp =  subset(temperature.DF, timestamp == unique(temperature.DF$timestamp)[i])
+  
+  #### some outliers in the data : negative value 
+  subset_timestamp[subset_timestamp < 0] <- NA
+  subset_timestamp = na.omit(subset_timestamp)
+  
+  
+  subset_timestamp_avg =  subset_timestamp %>%
+  summarise(value = mean(value))
+  subset_timestamp_avg$timestamp = as.POSIXct(unique(temperature.DF$timestamp)[i])
+
+temp_df[i,] = subset_timestamp_avg
+}
+  
+
+
+
+
+# "Relative Humidity (%)" :unq.clm.var[2]
+RH.DF <-  subset(clm.df.mapped, variable == unq.clm.var[2])
+RH.DF$timestamp = ymd_hms(RH.DF$timestamp)
+RH.DF$timestamp <-   floor_date(RH.DF$timestamp , "15 minutes")
+# create empty dataframe to store all values
+RH_df =   as.data.frame(matrix(nrow = length(unique(RH.DF$timestamp)), 
+                                  ncol = 2))
+colnames(RH_df) =c("value","timestamp")
+RH_df$value = as.numeric(RH_df$value)
+RH_df$timestamp = as.POSIXct(RH_df$value)
+
+
+for (i in 1:length( unique(RH.DF$timestamp))) {
+  subset_timestamp =  subset(RH.DF, timestamp == unique(RH.DF$timestamp)[i])
+  
+  #### some outliers in the data : negative value 
+  subset_timestamp[subset_timestamp < 0] <- NA
+  subset_timestamp = na.omit(subset_timestamp)
+  
+  subset_timestamp_avg =  subset_timestamp %>%
+  summarise(value = mean(value))
+  subset_timestamp_avg$timestamp = as.POSIXct(unique(RH.DF$timestamp)[i])
+
+RH_df[i,] = subset_timestamp_avg
+}
+  
+
+
+
+
+
+
+# "Flux Density (W/m^2)" : unq.clm.var[4]
+SR.DF <-  subset(clm.df.mapped, variable == unq.clm.var[4])
+SR.DF$timestamp = ymd_hms(SR.DF$timestamp)
+SR.DF$timestamp <-   floor_date(SR.DF$timestamp , "15 minutes")
+# create empty dataframe to store all values
+SR_df =   as.data.frame(matrix(nrow = length(unique(SR.DF$timestamp)), 
+                                  ncol = 2))
+colnames(SR_df) =c("value","timestamp")
+SR_df$value = as.numeric(SR_df$value)
+SR_df$timestamp = as.POSIXct(SR_df$value)
+
+
+for (i in 1:length( unique(SR.DF$timestamp))) {
+  subset_timestamp =  subset(SR.DF, timestamp == unique(SR.DF$timestamp)[i])
+  
+  #### some outliers in the data : negative value 
+  subset_timestamp[subset_timestamp < 0] <- NA
+  subset_timestamp = na.omit(subset_timestamp)
+  
+  subset_timestamp_avg =  subset_timestamp %>%
+  summarise(value = mean(value))
+  subset_timestamp_avg$timestamp = as.POSIXct(unique(SR.DF$timestamp)[i])
+
+SR_df[i,] = subset_timestamp_avg
+}
+  
+
+
+
+
+
+# "Windspeed (meters/second)" :unq.clm.var[5]
+WS.DF <-  subset(clm.df.mapped, variable == unq.clm.var[5])
+WS.DF$timestamp = ymd_hms(WS.DF$timestamp)
+WS.DF$timestamp <-   floor_date(WS.DF$timestamp , "15 minutes")
+# create empty dataframe to store all values
+WS_df =   as.data.frame(matrix(nrow = length(unique(WS.DF$timestamp)), 
+                                  ncol = 2))
+colnames(WS_df) =c("value","timestamp")
+WS_df$value = as.numeric(WS_df$value)
+WS_df$timestamp = as.POSIXct(WS_df$value)
+
+
+for (i in 1:length( unique(WS.DF$timestamp))) {
+  subset_timestamp =  subset(WS.DF, timestamp == unique(WS.DF$timestamp)[i])
+  
+  #### some outliers in the data : negative value 
+  subset_timestamp[subset_timestamp < 0] <- NA
+  subset_timestamp = na.omit(subset_timestamp)
+  
+  subset_timestamp_avg =  subset_timestamp %>%
+  summarise(value = mean(value))
+  subset_timestamp_avg$timestamp = as.POSIXct(unique(WS.DF$timestamp)[i])
+
+WS_df[i,] = subset_timestamp_avg
+}
+  
+
+
+temp_df$timestamp <- as.POSIXct(temp_df$timestamp, tz = "UTC")
+RH_df$timestamp <- as.POSIXct(RH_df$timestamp, tz = "UTC")
+SR_df$timestamp <- as.POSIXct(SR_df$timestamp,tz = "UTC")
+WS_df$timestamp <- as.POSIXct(WS_df$timestamp, tz = "UTC")
+
+names(temp_df)[names(temp_df) == "value"] <- "Temp"
+names(RH_df)[names(RH_df) == "value"] <- "RH"
+names(SR_df)[names(SR_df) == "value"] <- "SR"
+names(WS_df)[names(WS_df) == "value"] <- "WS"
+
+
+dfs <- list(temp_df, RH_df, SR_df, WS_df)
+lapply(dfs, function(df) names(df))  #check colnames before merge
+lapply(dfs, function(df) class(df$timestamp))  # check class before merge
+sapply(dfs, nrow)  
+
+
+weather12 <- merge(dfs[[1]], dfs[[2]], by = "timestamp", all = TRUE)
+weather123 <- merge(weather12, dfs[[3]], by = "timestamp", all = TRUE)
+weather <- merge(weather123, dfs[[4]], by = "timestamp", all = TRUE)
+
+
+
+## add date and VPD col
+weather$Date = date(weather$timestamp)
+weather <- weather[, c("Date", setdiff(names(weather), "Date"))]
+weather$VPD = NA
+names(weather)[names(weather) == "timestamp"] <- "TS"
+weather <- weather[, c("Date", "TS", "Temp", "RH", "VPD", "SR", "WS")]
+
+write.table(weather, file = "weather_data_sowing_to_harvest.csv", sep = ";", dec = ".", row.names = F)
+
+
+
+
+
+# Subset weather data only for time experiment #
+weather <- subset(weather, TS %in% dates)
+weather <- weather[!as.Date(weather$Date) %in% irrg.dts, ]
+
+
+# remove row of LC dataframe out of measurmeent period
+## need that timestamp of dates and LC fitted
+
+write.table(weather, file = "climate_raw.csv", sep = ";", dec = ".", row.names = F)
+  
+clm.n =  weather
+
+## weather s'arrete au 2025-03-12 11:00:00 mais poids continue jusqu'a 23:30
+# donc TS = 1293 et ce n'est pas problematique
+  
+nrow(weather)
+}
+if ((platform ==  "IRD") == TRUE) {
+  # clm.n <- read.csv(paste0(path, climate_file), sep = ";", dec = ".")
+  clm.n <- read.csv(climate_file_path, sep = ";", dec = ".")
+  
+  clm.n <- clm.n[,1:7]
+  clm.n$Date <- dmy(clm.n$Date)
+  clm.n$TS <- ifelse(grepl("^\\d{2}:\\d{2}$", clm.n$TS), paste0(clm.n$TS, ":00"), clm.n$TS)
+  # clm.n$TS <- as.POSIXct(clm.n$TS)
+  clm.n$RH <- as.numeric(substr(clm.n$RH, 1, 2))
+  }
+
+str(clm.n)
+print("Regardless of the source of climate data, the result here should be : Date (YYYY-MM-DD),TS (POSIXct or hms),Temp (num),RH (num),VPD (empty) ,SR (num),WS(num). Is it good? ")
+
+write.csv(clm.n, paste0(path, "./data/climate.csv"))
+save(clm.n, file = paste0(path, "./data/climate.RData"))
+load(file = paste0(path, "./data/climate.RData"))
+
+allData <- list(m.lc = m.lc, meta.d = meta.d, climate = clm.n) 
+
+```
+
+```{r load planimeter data}
+planimeter_data <- readline(prompt = "Do you have planimeter data to integrate? Required YES or NO  : ") 
+if ((planimeter_data == "YES")==TRUE) {
+  planimeter_file_path = paste0(path,planimeter_file)
+  planimeter_file_path = gsub('/\".', '',planimeter_file_path )
+planimeter_file_path = gsub('\"','',planimeter_file_path )
+
+  final_LA <- read.csv(planimeter_file_path, sep = ";")
+  allData <- list(m.lc = m.lc, meta.d = meta.d, climate = clm.n, final_LA = final_LA )
+} 
+
+save(allData, file = paste0(path, "./data/allData.RData"))
+load(file = paste0(path, "./data/allData.RData")) 
+```
+
+Now that the parameters have been defined, we can prepare the loadcell data.
+
+
+###  Stage I : Process LC data and generate ETr matrix
+
+```{r I : Prepare the LC data and meta data}
+print("Stage-I: Process LC data and generate ETr matrix")
+st.time <- Sys.time()
+
+#### Prepare the LC data and meta data
+print("Load  and prepare input data")
+load("./data/allData.RData")
+
+## remove from beggining irrigation dates
+m.lc = allData$m.lc
+
+m.lc$Date = as.Date(m.lc$timestamp)
+
+m.lc <- m.lc[!as.Date(m.lc$Date) %in% irrg.dts, ]
+
+
+# remove row of LC dataframe out of measurmeent period
+## need that timestamp of dates and LC fitted
+
+dates = as.POSIXct(dates)
+m.lc$timestamp <- floor_date(m.lc$timestamp, unit = "minute")
+m.lc$timestamp = as.POSIXct(m.lc$timestamp)
+m.lc <- subset(m.lc, m.lc$timestamp %in% dates)
+
+
+nrow(m.lc)
+
+
+meta.d <- allData$meta.d # Get Genotype and Exp design metadata
+species.nm <- unique(meta.d$Species) # Get the list of species from the metadata
+meta.d.sp <- meta.d[meta.d$Species==species.nm[1], ] # Include the species ID e.g. 1 for 'Sorghum' as per the data
+noEntrySecs <- which(!unique(m.lc$unit) %in% unique(meta.d.sp$unit)) # Find sectors with missing metadata
+noEntrySecNms <- unique(m.lc$unit)[noEntrySecs]
+m.lc <- m.lc[! m.lc$unit %in% noEntrySecNms, ] # Remove sectors-without-metadata from original loadcells file
+
+
+
+# Extract matrix of loadcell data 
+# This loop can be long, so run it once, then if you need to come back, don't hesitate to load the next object to save time. 
+LC.MAT.OP <- extractRawLCmatrix(x = m.lc, y = meta.d.sp, 
+                                s=firstDate, z = lastDate, 
+                                inter = seq_by)
+
+
+
+
+
+LC.MAT.f <- LC.MAT.OP$LC.MAT.f
+
+
+
+LC.MAT.TSinfo <- LC.MAT.OP$LC_tsmeta
+
+LC.MAT.f <- LC.MAT.f[!as.Date(LC.MAT.f$TS) %in% irrg.dts, ]
+LC.MAT.f <- subset(LC.MAT.f, LC.MAT.f$TS %in% dates)
+nrow(LC.MAT.f) #  1343
+
+
+
+
+
+save(LC.MAT.f, file = paste(opPATH.obj, "LC.MAT.f.RData", sep = ""))
+save(LC.MAT.TSinfo, file = paste(opPATH.obj, "LC.MAT.TSinfo.RData", sep = ""))
+load( file = paste(opPATH.obj, "LC.MAT.f.RData", sep = ""))
+load( file = paste(opPATH.obj, "LC.MAT.TSinfo.RData", sep = ""))
+
+
+```
+
+
+```{r outlier WEIGHT detection before filtering}
+print("outlier WEIGHT detection BEFORE filtering")
+nb_negatifs <- sum(LC.MAT.f < 0, na.rm = TRUE)
+max <- max(
+  LC.MAT.f[sapply(LC.MAT.f, is.numeric)],
+  na.rm = TRUE
+)
+ #is this a possible weight (in grams)?
+
+cat("Dataset (LC.MAT.f) can contain negative weights and outliers weights. You have", nb_negatifs, "negatives values and the maximum weight is ", max ,"g")
+
+
+```
+
+
+```{r plot  WEIGHT  before filtering}
+print("Plot the raw weights")
+weight_profile_output = draw_weight_raw(data=LC.MAT.f)
+```
+
+```{r create output  with weight with outliers}
+# Add metadata to LC matrix : 
+meta.d.LCmat <- meta.d.sp[
+    meta.d.sp$unit %in% colnames(LC.MAT.f)[-1],
+    c("unit", "old_unit", "Treatment", "Genotype", "G..Alias", "Replicates")]
+
+LC.MAT.f.t <- as.data.frame(t(LC.MAT.f))
+
+colnames(LC.MAT.f.t) <- LC.MAT.f.t[1,]
+LC.MAT.f.t = LC.MAT.f.t[-1,]
+ncol(LC.MAT.f.t)
+
+meta.LCDF <- meta.d.LCmat[order(match(meta.d.LCmat$unit, rownames(LC.MAT.f.t))), ] # reorder rows of 'meta.d.sp' according to rownames/unit of LC.MAT.f.t
+
+LC.MAT.raw <- as.data.frame(cbind(meta.LCDF, LC.MAT.f.t))
+ncol(LC.MAT.raw)
+
+save(LC.MAT.raw, file = paste(opPATH.obj, "LC.MAT.raw.RData", sep = ""))
+load(file = paste(opPATH.obj, "LC.MAT.raw.RData", sep = ""))
+
+
+write.table(LC.MAT.raw, paste0(opPATH, "OP-1","_weight_raw.csv"), sep = ";", row.names = F) # OP-1 : RAW WEIGHT DATA BEFORE FILTERING
+
+
+
+```
+
+```{r  sort outliers with curateRawLC function  }
+imputed.DF.final <- curateRawLC(x = LC.MAT.f, y = meta.LCDF, z= avg_wgt) ## +/- 30 % DONE
+ncol(imputed.DF.final)-6 # 6 col of metadata, others are TS :  1536 problem it should be lower without irrigation /only measurement dates
+
+df_imputed.DF.final = as.data.frame(t(imputed.DF.final))
+TS_df = rownames(df_imputed.DF.final)[7:nrow(df_imputed.DF.final)] # 
+Date = t(c(NA, NA,NA,NA,NA,NA,rownames(df_imputed.DF.final)[7:nrow(df_imputed.DF.final)]))
+Date = as.Date(Date)
+df_imputed.DF.final$Date= Date
+
+
+df_imputed.DF.final <- df_imputed.DF.final[!(df_imputed.DF.final$Date) %in% irrg.dts, ]
+df_imputed.DF.final <- df_imputed.DF.final[, setdiff(colnames(df_imputed.DF.final), "Date")] 
+nrow(df_imputed.DF.final) -6 ## ok ! TS without irrigation match with imputed.DF.final ! 
+
+imputed.DF.final = t(df_imputed.DF.final)
+imputed.DF.final = as.data.frame(imputed.DF.final)
+
+write.table(LC.MAT.raw, paste0(opPATH, "OP-2","_weight_imputed_cleaned1.csv"), sep = ";", row.names = F) 
+
+save(imputed.DF.final, file = paste(opPATH.obj, "imputed.DF.final.RData", sep = ""))
+load(file = paste(opPATH.obj, "imputed.DF.final.RData", sep = ""))
+
+```
+
+```{r  visualize weight outliers after filtering , warning=FALSE }
+# Outliers detection post curateRawLC
+print("outlier WEIGHT detection AFTER filtering")
+imputed.DF.final[, -(1:6)] <- lapply(imputed.DF.final[, -(1:6)], function(x) {
+  if (is.character(x)) as.numeric(x) else x
+})
+  
+  
+nb_negatifs <- sum(imputed.DF.final < 0, na.rm = TRUE)
+max <- max(
+  imputed.DF.final[, -(1:6)][sapply(imputed.DF.final[, -(1:6)], is.numeric)],
+  na.rm = TRUE
+)
+ #is this a possible weight (in grams)?
+
+cat("Dataset should not contain negative weights, and maximum weight should not be an outlier. You have", nb_negatifs, "negatives values and the maximum weight is ", max ,"g")
+
+```
+
+```{r write output 2 after weight filtering and plot}
+# Identify the highly extreme valued sectors #
+err.sec.info <- filterLCExtremeCols(x = imputed.DF.final, y = meta.LCDF)
+
+err.sec.nm <- err.sec.info$err.sec.NM
+
+err.sec.meta <- err.sec.info$err.sec.META
+
+write.table(err.sec.meta, paste0(opPATH, "OP-3","_weight_outliers_LC_removed.csv"), sep = ";", row.names = F)
+
+# Remove the err.cols i.e. sectors with extreme values
+impData.errSEC.rmvd <- imputed.DF.final[!imputed.DF.final$unit %in% err.sec.nm, ]
+save(impData.errSEC.rmvd, file = paste(opPATH.obj, "impData.errSEC.rmvd.RData", sep = ""))
+load(file = paste(opPATH.obj, "impData.errSEC.rmvd.RData", sep = ""))
+
+write.table(err.sec.meta, paste0(opPATH, "OP-4","_weight_imputed_cleaned2.csv"), sep = ";", row.names = F)
+```
+
+
+```{r LC removed in the process}
+# to know what LC have been removed
+list_before = list(unique(LC.MAT.TSinfo$unit))  ## list unit before filtering
+list_after  = list(unique(impData.errSEC.rmvd$unit))  ## list unit after filtering
+
+units_before <- list_before[[1]] 
+units_after  <- list_after[[1]]
+
+# éléments présents dans before mais pas après
+LC_rmvd<- setdiff(units_before, units_after)
+
+cat("The following LC have been removed: ", paste(LC_rmvd, collapse = ", "), "\n")
+```
+
+```{r plot weight data after filtering}
+# Now, the weight profile should be cleaned. Verify on  LC 
+print("Plot the weight data after filtering. cleaned weights (weight outliers must be removed)")
+weight_profile_output = draw_weight_cleaned(data=impData.errSEC.rmvd, path = path)
+```
+
+
+
+###  Stage II : Generate ETr profiles in grams
+
+```{r Generate ETr profiles}
+print("Generate ETr profiles with cleaned weight data")
+et.vals <- getETr(x = impData.errSEC.rmvd)
+
+save(et.vals, file = paste(opPATH.obj, "et.vals.RData", sep = ""))
+load(file = paste(opPATH.obj, "et.vals.RData", sep = ""))
+
+et.obs <- et.vals$obsETr_core
+
+ETr_Meta <- et.vals$obsETr_meta
+
+save(ETr_Meta, file = paste(opPATH.obj, "ETr_Meta.RData", sep = ""))
+load(file = paste(opPATH.obj, "ETr_Meta.RData", sep = ""))
+```
+
+
+```{r plot ETr values before conversion, eval=FALSE }
+print("Plot  evapotranspiration values before conversion grams to mm")
+ET_profile_output = suppressWarnings(draw_ETr_before_conversion(data=ETr_Meta))
+write.table(ETr_Meta, paste0(opPATH,  "OP-5_ETr_values_before_conversion.csv"), col.names = TRUE, row.names = FALSE, sep = ";", dec = ".")
+
+```
+
+
+###  Stage III : Conversion ETr in mm
+
+```{r convert ETr in gram}
+# Convert ETr in grams to mm (Y/N) # 
+print(" Would you like to convert the evapotranspiration data (currently in grams) into mm? Required : YES or NO")
+print("you'll need to indicate which platform you're working on. Required : IRD or ICRISAT")  
+ETr_F <- convETr(x = ETr_Meta) 
+ 
+save(ETr_F , file = paste(opPATH.obj,  "ETr_F.RData", sep = ""))
+load(file = paste(opPATH.obj, "ETr_F.RData", sep = ""))
+
+ncol(ETr_F)-6 # n TS 
+```
+
+```{r plot ETr values and write output ETr, message=FALSE}
+print("Plot raw evapotranspiration values after conversion grams/mm")
+ET_profile_output = suppressWarnings(draw_ETr_raw(data=ETr_F))
+write.table(ETr_F, paste0(opPATH,  "OP-6_ETr_raw_after_conversion.csv"), col.names = TRUE, row.names = FALSE, sep = ";", dec = ".")
+
+```
+
+###  Stage IV: Process Weather data 
+
+```{r process Weather data}
+print(' Stage-II: Process Weather data to obtain ETref + filter ETr based on ETref ')
+
+wthr.DFagg15min <- allData$climate
+nrow(wthr.DFagg15min)
+
+
+TS_weather = ymd_hms(paste (wthr.DFagg15min$Date, wthr.DFagg15min$TS)) ## TS kept after irrigation 
+length(TS_weather)
+TS_weather = as.POSIXct(TS_weather)
+head(TS_weather)
+
+
+save(TS_weather, file =  paste(opPATH.obj,  "TS_weather.RData", sep = ""))
+load(file = paste(opPATH.obj,  "TS_weather.RData", sep = "")) ## TS without irrigation, only for 
+
+
+wthr.DFagg15min$TS <- TS_weather 
+
+# # create empty dataframe to store all values
+Wthr.MAT <- as.data.frame(matrix(nrow = length(TS_weather), 
+                                  ncol = 2 ))
+ 
+Wthr.MAT[ ,1] <- date(TS_weather); names(Wthr.MAT)[1] <- "Date"
+
+Wthr.MAT[ ,2] <- (TS_weather); names(Wthr.MAT)[2] <- "TS"
+
+# 
+# colnames(Wthr.MAT)[3:ncol(Wthr.MAT)] <- names(wthr.DFagg15min)[3:ncol(wthr.DFagg15min)] 
+
+Wthr.MAT <- Wthr.MAT[, !duplicated(names(Wthr.MAT))]
+wthr.DFagg15min <- wthr.DFagg15min[, !duplicated(names(wthr.DFagg15min))]
+# 
+# wthr.DFagg15min$TS = as.POSIXct(wthr.DFagg15min$TS)
+nrow( wthr.DFagg15min )
+nrow( Wthr.MAT )
+
+
+
+wthr.DFagg15min <- wthr.DFagg15min[!apply(wthr.DFagg15min, 1, function(row) all(is.na(row))), ]
+Wthr.MAT <- Wthr.MAT[!apply(Wthr.MAT, 1, function(row) all(is.na(row))), ]
+
+
+df <- merge(x = Wthr.MAT, y = wthr.DFagg15min, by = "TS", all.x = TRUE)
+
+
+
+
+nrow(df) == length(TS_weather)
+
+colnames(df)
+df <- df [c("TS" ,  "Temp",   "RH"  ,   "VPD"   , "SR"    , "WS")] 
+
+# 
+df <- df[!duplicated(df[c("TS")]),]
+# colnames(df.new)[2] <- names(wthr.DFagg15min)[1]
+
+# 
+etrDTS <- as.data.frame(colnames(ETr_F)[7:ncol(ETr_F)])
+names(etrDTS) <- "TS"
+etrDTS$TS <- ymd_hms(etrDTS$TS)
+
+wthr.DFagg15min.filt <- df
+
+# Compute VPD and insert into the weather DF #
+SVP <- 610.7*(10^(7.5*wthr.DFagg15min.filt$Temp/(237.3+wthr.DFagg15min.filt$Temp)))
+VPD <- ((1 - (wthr.DFagg15min.filt$RH/100))*SVP)/1000
+wthr.DFagg15min.filt$VPD <- VPD
+
+et.obs <- ETr_F
+save(et.obs, file = paste(opPATH.obj,  "et.obs.RData", sep = ""))
+
+col <- colnames(et.obs)[7:ncol(et.obs)]
+utc_times <- as.POSIXct(col, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+new_names <- format(utc_times, format = "%Y-%m-%d %H:%M:%S UTC", tz = "UTC")
+colnames(et.obs)[7:ncol(et.obs)] <- new_names
+
+
+# Calculate Penman Monteith ET #
+wthr.df1 <- calculateETref(x=wthr.DFagg15min.filt)
+max(wthr.df1$ETref) ## possible or outlier?
+wthr.ETref.df <- as.data.frame(wthr.df1)
+
+# select columns "Temp"  "RH"    "VPD"   "SR"    "WS"    "Tmax"  "Tmin"  "ETref"
+empty.MAT.wthr.ETref  = as.data.frame(t(wthr.ETref.df[,c( "Temp",  "RH",    "VPD",   "SR",    "WS", "Tmax",  "Tmin",  "ETref")]))
+colnames(empty.MAT.wthr.ETref) = wthr.ETref.df$TS
+n <- 6  # add empty col
+empty_cols <- as.data.frame(matrix(NA, nrow = nrow(empty.MAT.wthr.ETref), ncol = n))
+empty.MAT.wthr.ETref <- cbind(empty_cols, empty.MAT.wthr.ETref)
+colnames(empty.MAT.wthr.ETref)[1:6] <- colnames(et.obs)[1:6]
+
+metad_col <- et.obs[1:6]
+weather_ETr <- colnames(et.obs)[7:ncol(et.obs)]
+weather_ETr <- trimws(weather_ETr)
+TS_weather <- trimws(TS_weather)
+# Supprimer " UTC" de weather_ETr
+weather_ETr <- gsub(" UTC$", "", weather_ETr)
+colnames(et.obs) <- gsub(" UTC$", "", colnames(et.obs) ) ## parfois UTC presnent/ parfois non
+
+
+# Function to add "00:00:00" time to any date string that only has date (length == 10)
+uniform_format <- function(dates) {
+  # If string length is exactly 10, append " 00:00:00" (start of day)
+  dates_fixed <- ifelse(nchar(dates) == 10, paste0(dates, " 00:00:00"), dates)
+  return(dates_fixed)
+}
+
+weather_ETr <- uniform_format(weather_ETr)
+TS_weather = uniform_format(TS_weather)
+matched_weather_cols <- intersect(weather_ETr, TS_weather)
+length(matched_weather_cols)
+
+
+nrow(metad_col)
+
+et.obs.filtered <- et.obs[, c(matched_weather_cols)]
+et.obs.filtered <- cbind(et.obs [1:6], et.obs.filtered)
+
+et.obs = et.obs.filtered
+ncol(et.obs)
+ncol(empty.MAT.wthr.ETref)
+
+colnames(empty.MAT.wthr.ETref) <- uniform_format(colnames(empty.MAT.wthr.ETref) )
+colnames(et.obs)<- uniform_format(colnames(et.obs))
+
+# et.obs <- et.obs[, colnames(empty.MAT.wthr.ETref)]
+
+head(colnames(empty.MAT.wthr.ETref))
+head(colnames(et.obs))
+
+ncol(et.obs)
+ncol(empty.MAT.wthr.ETref)
+# Keep only common columns
+common_cols <- intersect(names(et.obs), names(empty.MAT.wthr.ETref))
+
+# Subset both data frames to those columns
+df1_common <- empty.MAT.wthr.ETref[, common_cols, drop = FALSE]
+df2_common <- et.obs[, common_cols, drop = FALSE]
+
+# Bind the rows
+wthr.ETref.ETobs <- rbind(df1_common, df2_common)
+
+
+```
+
+```{r intermediate save wthr.ETref.ETobs }
+## save some parts of wthr.ETref.ETobs dataframe to reuse in the follwing steps
+# (the format of wthr.ETref.ETobs will be use for the features extraction, hence you have to come back to this format each time)
+
+metad_emptyrows= wthr.ETref.ETobs[,1:6]
+rownames(metad_emptyrows)[9:nrow(metad_emptyrows)] =metad_emptyrows[9:nrow(metad_emptyrows),1]
+save(metad_emptyrows, file =  paste(opPATH.obj,"metad_emptyrows.RData", sep = ""))
+load(file =  paste(opPATH.obj,"metad_emptyrows.RData", sep = ""))
+
+weather_data= t(wthr.ETref.ETobs[1:8,])
+weather_data= weather_data[7:nrow(weather_data),]
+
+save(weather_data, file =  paste(opPATH.obj,"weather_data.RData", sep = ""))
+load(file =  paste(opPATH.obj,"weather_data.RData", sep = ""))
+
+
+save(wthr.ETref.ETobs, file =  paste(opPATH.obj,"wthr.ETref.ETobs.RData", sep = ""))
+load(file =  paste(opPATH.obj,"wthr.ETref.ETobs.RData", sep = ""))
+
+
+
+```
+
+###  Plot weather data 
+
+
+
+```{r plot  weather conditions}
+#  Draw  weather conditions + VPD + ETref over time
+print("Plot ETref, VPD values and weather data over time")
+ETref_profile_output = draw_ETref_VPD(data=weather_data)
+ETref_profile_output = draw_ETref_VPD_per_day(data=weather_data)
+profile_output = draw_weather_per_day(data=weather_data)
+
+
+```
+
+###  Stage V: Filter ETr based on Solar Radiation and ETref conditions 
+
+```{r filter ETobs based on ETref and SR }
+## Filter ETobs based on ETREF values on solar radiation values (SR)  instead of hours (in the initial version) 
+### if SR = 0 -->  night period --> ET = 0
+### if SR > 0 -->  day period --> -0.01<ET<ETref
+
+#This loop can be long, so run it once, then if you need to come back, don't hesitate to load the next object to save time. 
+ET_ratio_mat <- generateETrRatio(x = wthr.ETref.ETobs) 
+save(ET_ratio_mat, file =  paste(opPATH.obj,"ET_ratio_mat.RData", sep = ""))
+load(file =  paste(opPATH.obj,"ET_ratio_mat.RData", sep = ""))
+```
+
+
+```{r filter ETobs based on ETref and SR}
+#  come back to wthr.ETref.ETobs format:  with metadata + a dataframe (TS in col, LC in row)
+wthr.ETref.ETobs_ratio= t(ET_ratio_mat)
+wthr.ETref.ETobs_ratio= cbind(metad_emptyrows, wthr.ETref.ETobs_ratio) ## ET filtered non normalized, with the expected format (wthr.ETref.ETobs format)
+
+save(wthr.ETref.ETobs_ratio, file =  paste(opPATH.obj,"wthr.ETref.ETobs_ratio.RData", sep = ""))
+load(file =  paste(opPATH.obj,"wthr.ETref.ETobs_ratio.RData", sep = ""))
+
+write.table(wthr.ETref.ETobs_ratio, paste0(opPATH, "OP-7_ETr_imputed_non_smooth.csv"), sep = ";", row.names = F, dec = ".")
+
+```
+
+
+
+```{r identify and remove error plots - ETr values }
+
+# # Identify error plots from ETr values using the similar method as above #
+ETr_err.sec.info <- filterETrExtremeCols(x = wthr.ETref.ETobs_ratio, y = meta.LCDF) ## FILTRER APRES LA PARTIE ET ETREF !!!
+
+err.sec.nm <- ETr_err.sec.info$ETr_err.sec.NM
+
+err.sec.meta <- ETr_err.sec.info$ETr_err.sec.META
+
+if(length(err.sec.nm)>0){write.table(err.sec.meta,
+                                     paste0(opPATH, "OP-8_ETr_outliers_LC_removed.csv"), sep = ";", row.names = F, dec = ".")}
+
+# Remove the err.cols i.e. sectors with extreme values #
+ETr_Meta_ERRsec.rmvd <- wthr.ETref.ETobs_ratio
+
+ETr_Meta_ERRsec.rmvd <- ETr_Meta_ERRsec.rmvd[!ETr_Meta_ERRsec.rmvd$unit %in% err.sec.nm, ]
+
+write.table(ETr_Meta_ERRsec.rmvd, paste0(opPATH,
+                                         "OP-9_ETr_filtered_interpolated.csv"), sep = ";", row.names = F, dec = ".")
+save(ETr_Meta_ERRsec.rmvd, file =  paste(opPATH.obj,"ETr_Meta_ERRsec.rmvd.RData", sep = ""))
+load(paste(opPATH.obj,"ETr_Meta_ERRsec.rmvd.RData", sep = ""))
+
+
+
+# identify which LCs have been removed
+list_before = list(unique(ETr_Meta$unit))  ## list unit before filtering
+list_after  = list(unique(ETr_Meta_ERRsec.rmvd$unit)) ## list unit after filtering
+
+units_before <- list_before[[1]] 
+units_after  <- list_after[[1]]
+
+# éléments présents dans before mais pas après
+LC_rmvd<- setdiff(units_before, units_after)
+cat(paste0("The following LC have been removed", LC_rmvd) )
+
+
+
+```
+
+
+```{r}
+print("Plot  ETr interpolated non smooth")
+ET_profile_output = suppressWarnings(draw_ETr_cleaned(data=ETr_Meta_ERRsec.rmvd))
+
+```
+```{r}
+print("Plot to compare ETr and ETref")
+ET_profile_output = suppressWarnings(draw_ETr_ETref_plot(data=ETr_Meta_ERRsec.rmvd))
+
+```
+
+###  --> Extraction of features on ETr interpolated (non smoothed, non normalized by Leaf area)
+
+
+```{r extraction ETr non smooth}
+unq.dts = unique(as.Date(colnames(ETr_Meta_ERRsec.rmvd[7:ncol(ETr_Meta_ERRsec.rmvd)])))
+
+
+featuresRES <- getFeatures_30min(x = ETr_Meta_ERRsec.rmvd)
+allFeatures <- featuresRES$allFeatures
+
+
+
+# create H2 dataframe to store H2 est. of each feature for each day
+F.He <- as.data.frame(matrix(NA, nrow = length(unq.dts), ncol = 15)) # Date-ROW, feature-COL
+
+ colnames(F.He) <- c("maxET", "slope.maxET.6", "slope.07maxET", "slope.00.07", "slope.19.2330", "curvmaxET", 
+                       "total.auc","auc.10.15", "sd.10.15", "auc.prop.10.15", "auc.07.19", "sd.07.19",  
+                       "auc.prop.07.19", "auc.night", "cos.sim.index")
+rownames(F.He) <- unq.dts
+
+featureHeRES <- getFeatureHe_30min(x = allFeatures, y = ETr_Meta_ERRsec.rmvd, d = unq.dts, p = opPATH.raw)
+write.csv(featureHeRES, paste0(opPATH.raw, "ETr_non_smooth_featureH2.csv"))
+
+
+## Prepare data for 'each feature'
+maxET <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+slope.maxET.6 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+slope.07maxET <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+slope.00.07 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+slope.19.2330 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+curvmaxET <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+total.auc <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+auc.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+sd.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+auc.prop.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+auc.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+sd.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+auc.prop.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+auc.night <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+cos.sim.index <- as.data.frame(matrix(nr = (nrow(ETr_Meta_ERRsec.rmvd)-8), nc = length(unq.dts)))
+
+for (j in 1:(nrow(ETr_Meta_ERRsec.rmvd)-8)){
+  
+  for(d in 1:length(unq.dts))
+  {maxET[j, d] <- data.frame(allFeatures[[j]][d, 1])
+  slope.maxET.6[j, d] <- data.frame(allFeatures[[j]][d, 2])
+  slope.07maxET[j, d] <- data.frame(allFeatures[[j]][d, 3])
+  slope.00.07[j, d] <- data.frame(allFeatures[[j]][d, 4])
+  slope.19.2330[j, d] <- data.frame(allFeatures[[j]][d, 5])
+  
+  curvmaxET[j, d] <- data.frame(allFeatures[[j]][d, 6])
+  total.auc[j, d] <- data.frame(allFeatures[[j]][d, 7])
+  auc.10.15[j, d] <- data.frame(allFeatures[[j]][d, 8])
+  sd.10.15 [j, d] <- data.frame(allFeatures[[j]][d, 9])
+  auc.prop.10.15[j, d] <- data.frame(allFeatures[[j]][d, 10])
+  
+  auc.07.19[j, d] <- data.frame(allFeatures[[j]][d, 11])
+  sd.07.19[j, d] <- data.frame(allFeatures[[j]][d, 12])
+  auc.prop.07.19[j, d] <- data.frame(allFeatures[[j]][d, 13])
+  auc.night [j, d] <- data.frame(allFeatures[[j]][d, 14])
+  cos.sim.index[j, d] <- data.frame(allFeatures[[j]][d, 15])
+  }
+  
+} 
+
+names(maxET)=names(slope.maxET.6)=names(slope.07maxET)=names(slope.00.07)=names(slope.19.2330)<-unq.dts
+names(curvmaxET)=names(total.auc)=names(auc.10.15)=names(sd.10.15)=names(auc.prop.10.15)<-unq.dts
+names(auc.07.19)=names(sd.07.19)=names(auc.prop.07.19)=names(auc.night)=names(cos.sim.index)<-unq.dts
+
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], maxET)), 
+            file= paste0(opPATH.smth, "maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], slope.maxET.6)), 
+            paste0(opPATH.smth, "slope.maxET.6.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], slope.00.07)), 
+            paste0(opPATH.smth, "slope.00.07.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], slope.07maxET)), 
+            paste0(opPATH.smth, "slope.07maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], slope.19.2330)), 
+            paste0(opPATH.smth, "slope.19.2330.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], curvmaxET)), 
+            paste0(opPATH.smth, "curvmaxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], total.auc)), 
+            paste0(opPATH.smth, "total.auc.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], auc.10.15)), 
+            paste0(opPATH.smth, "auc.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], sd.10.15)), 
+            paste0(opPATH.smth, "sd.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], auc.prop.10.15)), 
+            paste0(opPATH.smth, "auc.prop.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], auc.07.19)), 
+            paste0(opPATH.smth, "auc.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], sd.07.19)), 
+            paste0(opPATH.smth, "sd.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], auc.prop.07.19)), 
+            paste0(opPATH.smth, "auc.prop.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], auc.night)), 
+            paste0(opPATH.smth, "auc.night.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 1:6], cos.sim.index)), 
+            paste0(opPATH.smth, "cos.sim.index.csv"), dec = ".", sep = ";", row.names = F)
+
+```
+
+###  Stage VI: Smooth ETr 
+
+```{r smoothing}
+ETr_smth = smoothETr(x= ETr_Meta_ERRsec.rmvd)
+save(ETr_smth, file =  paste(opPATH.obj,"ETr_smth.RData", sep = ""))
+load(file =  paste(opPATH.obj,"ETr_smth.RData", sep = ""))
+
+```
+
+```{r plot ETr smooth non normalized}
+print("Plot  ETr profiles smooth")
+ET_profile_output = suppressWarnings(draw_ETr_smooth(data=ETr_smth))
+write.table(ETr_smth, paste0(opPATH,  "OP-ETr_smth.csv"), col.names = TRUE, row.names = FALSE, sep = ";", dec = ".")
+```
+
+```{r plot ETr smooth non normalized}
+# with smoothing step, some aberrants peaks appers (if too many NA, the smoothing is not good quality). 
+## Objective : removed these peaks based on max per day 
+# data=as.data.frame(t(ETr_smth_metadata))
+# data = data[7:nrow(data),9:ncol(data)]
+# 
+# 
+#   data <- cbind(
+#     TS = as.POSIXct(rownames(data), tz = "UTC"),
+#     date = as.factor(date(TS)),
+#     data ## data and ETref
+#   )
+#   
+# LC = colnames(data)[3:ncol(data)]
+# 
+# ## prepare dataframe unique_date used in the loop to call date and n_day
+# unique_date= data.frame(matrix( nrow = length( unique(data$date)), ncol = 2))
+# colnames(unique_date)=c ("n_day", "day")
+# unique_date$n_day= (1:nlevels(data$date))
+# unique_date$day= levels(data$date)
+# unique_date$day= date( unique_date$day)
+# 
+# ## prepare dataframe max_day to store value
+# max_day= data.frame(matrix(NA, nrow = length( unique(data$date)), ncol = 2)) ## create a empty dataframe to store data
+# colnames(max_day)=c ("date", "max")
+# max_day$max = as.numeric(max_day$max)
+# max_day$date = date(max_day$date)
+# 
+# dat_rmd= data.frame(matrix(NA, nrow = length(LC), ncol = 1)) ## create a empty dataframe to store data
+# rownames(dat_rmd)=LC
+# 
+# 
+# for (n in (3:(ncol(data)))) { # for each LC (2 first col = TS and date)
+#   print(n)
+#   subset_LC=data.frame(data$TS, data$date, data[n]) # create dataframe with only TS, date and LC n
+#   colnames(subset_LC)= c("TS", "date", colnames(data)[n])
+#   subset_LC$date = date(subset_LC$date)
+#   
+#   for (i in 1:nrow(unique_date) ){ # for each day
+#     
+#     subset_day<- subset_LC[subset_LC$date %in% c(unique_date[i,2]), ] ## create a dataframe with only one day
+#     max_day[i,1]= unique_date[i,2]
+#     max_day[i,2]= max(subset_day[,3])
+#   }
+#   
+#   max_day$max = as.numeric(max_day$max)
+# 
+#   ol <- boxplot(as.numeric(max_day$max), plot = FALSE)$out
+#   tf <- which(max_day$max %in% ol)
+#   date_to_rmd = max_day$date[tf]
+#   date_to_rmd
+#   data$date=date(subset_LC$date)
+#   
+#   if (length(date_to_rmd) == 0){
+#     print("all days of data have been kept")
+#     dat_rmd[n,] =0
+#     
+#   } else {
+#     for (date in 1:nrow(data)) {
+#       for (nday_to_rmd in 1:length(date_to_rmd)){
+#         if (data$date[date]  == date_to_rmd[nday_to_rmd]) {
+#           row_to_rmd=  which(data$date %in% date_to_rmd)
+#           data[row_to_rmd,n]=NA
+#           print(paste(length(date_to_rmd),"day(s) have been removed"))
+#           dat_rmd[n,] = length(date_to_rmd)}
+#       }
+#     }
+#   }
+# }
+# 
+# ETr_smooth_outrmd = t(data)
+# ETr_smooth_outrmd = ETr_smooth_outrmd[3:nrow(ETr_smooth_outrmd),]
+# ETr_smooth_outrmd = rbind(t(weather_data), ETr_smooth_outrmd)
+# ETr_smooth_outrmd <- cbind(
+#   metad_emptyrows[rownames(ETr_smooth_outrmd), , drop = FALSE],
+#   ETr_smooth_outrmd
+# )
+# 
+# ETr_smooth_outrmd[, -(1:6)] <- lapply(
+#   ETr_smooth_outrmd[, -(1:6)],
+#   function(x) {
+#     if (is.character(x)) as.numeric(x) else x
+#   }
+# )
+# 
+# save(ETr_smooth_outrmd, file =  paste(opPATH.obj,"ETr_smooth_outrmd.RData", sep = ""))
+# load(paste(opPATH.obj,"ETr_smooth_outrmd.RData", sep = ""))
+
+
+```
+
+
+
+
+
+improve the smoothing ??? WORK IN PROGRESS !!
+
+
+
+###  --> Extraction of features on ETr smooth profile (non normalized by leaf area )
+
+
+
+```{r extraction ETr smooth}
+load(file =  paste(opPATH.obj,"ETr_smth.RData", sep = ""))
+unq.dts = unique(as.Date(colnames(ETr_smth[7:ncol(ETr_smth)])))
+
+featuresRES <- getFeatures_30min(x = ETr_smth)
+allFeatures <- featuresRES$allFeatures
+
+# create H2 dataframe to store H2 est. of each feature for each day
+F.He <- as.data.frame(matrix(NA, nrow = length(unq.dts), ncol = 15)) # Date-ROW, feature-COL
+
+ colnames(F.He) <- c("maxET", "slope.maxET.6", "slope.07maxET", "slope.00.07", "slope.19.2330", "curvmaxET", 
+                       "total.auc","auc.10.15", "sd.10.15", "auc.prop.10.15", "auc.07.19", "sd.07.19",  
+                       "auc.prop.07.19", "auc.night", "cos.sim.index")
+rownames(F.He) <- unq.dts
+
+featureHeRES <- getFeatureHe_30min(x = allFeatures, y = ETr_smth, d = unq.dts, p = opPATH.smth)
+write.csv(featureHeRES, paste0(opPATH.smth, "ETr_smooth_featureH2.csv"))
+
+
+## Prepare data for 'each feature'
+maxET <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+slope.maxET.6 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+slope.07maxET <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+slope.00.07 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+slope.19.2330 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+curvmaxET <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+total.auc <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+auc.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+sd.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+auc.prop.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+auc.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+sd.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+auc.prop.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+auc.night <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+cos.sim.index <- as.data.frame(matrix(nr = (nrow(ETr_smth)-8), nc = length(unq.dts)))
+
+for (j in 1:(nrow(ETr_smth)-8)){
+  
+  for(d in 1:length(unq.dts))
+  {maxET[j, d] <- data.frame(allFeatures[[j]][d, 1])
+  slope.maxET.6[j, d] <- data.frame(allFeatures[[j]][d, 2])
+  slope.07maxET[j, d] <- data.frame(allFeatures[[j]][d, 3])
+  slope.00.07[j, d] <- data.frame(allFeatures[[j]][d, 4])
+  slope.19.2330[j, d] <- data.frame(allFeatures[[j]][d, 5])
+  
+  curvmaxET[j, d] <- data.frame(allFeatures[[j]][d, 6])
+  total.auc[j, d] <- data.frame(allFeatures[[j]][d, 7])
+  auc.10.15[j, d] <- data.frame(allFeatures[[j]][d, 8])
+  sd.10.15 [j, d] <- data.frame(allFeatures[[j]][d, 9])
+  auc.prop.10.15[j, d] <- data.frame(allFeatures[[j]][d, 10])
+  
+  auc.07.19[j, d] <- data.frame(allFeatures[[j]][d, 11])
+  sd.07.19[j, d] <- data.frame(allFeatures[[j]][d, 12])
+  auc.prop.07.19[j, d] <- data.frame(allFeatures[[j]][d, 13])
+  auc.night [j, d] <- data.frame(allFeatures[[j]][d, 14])
+  cos.sim.index[j, d] <- data.frame(allFeatures[[j]][d, 15])
+  }
+  
+} 
+
+names(maxET)=names(slope.maxET.6)=names(slope.07maxET)=names(slope.00.07)=names(slope.19.2330)<-unq.dts
+names(curvmaxET)=names(total.auc)=names(auc.10.15)=names(sd.10.15)=names(auc.prop.10.15)<-unq.dts
+names(auc.07.19)=names(sd.07.19)=names(auc.prop.07.19)=names(auc.night)=names(cos.sim.index)<-unq.dts
+
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], maxET)), 
+            file= paste0(opPATH.smth, "maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], slope.maxET.6)), 
+            paste0(opPATH.smth, "slope.maxET.6.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], slope.00.07)), 
+            paste0(opPATH.smth, "slope.00.07.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], slope.07maxET)), 
+            paste0(opPATH.smth, "slope.07maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], slope.19.2330)), 
+            paste0(opPATH.smth, "slope.19.2330.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], curvmaxET)), 
+            paste0(opPATH.smth, "curvmaxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], total.auc)), 
+            paste0(opPATH.smth, "total.auc.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], auc.10.15)), 
+            paste0(opPATH.smth, "auc.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], sd.10.15)), 
+            paste0(opPATH.smth, "sd.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], auc.prop.10.15)), 
+            paste0(opPATH.smth, "auc.prop.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], auc.07.19)), 
+            paste0(opPATH.smth, "auc.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], sd.07.19)), 
+            paste0(opPATH.smth, "sd.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], auc.prop.07.19)), 
+            paste0(opPATH.smth, "auc.prop.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], auc.night)), 
+            paste0(opPATH.smth, "auc.night.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth[9:nrow(ETr_smth), 1:6], cos.sim.index)), 
+            paste0(opPATH.smth, "cos.sim.index.csv"), dec = ".", sep = ";", row.names = F)
+
+```
+
+
+
+
+###  Stage VII: Process planimeter data and estimate Leaf area over time
+
+```{r integrate planimeter data if no PlantEye data  }
+
+
+print("Load planimeter file")
+
+load(file = paste0(path, "./data/allData.RData")) 
+
+LA_HARVEST = allData$final_LA
+LA_HARVEST$unit = paste0(LA_HARVEST$TABLE, "_", LA_HARVEST$POSITION)
+
+str(LA_HARVEST)
+
+LA_HARVEST = arrange(LA_HARVEST, LA_HARVEST$unit)
+print("if you have planimeter data, but no PlantEye data, you can plot a linear regression, from 0 (emergence) to the harvest date (planimeter), to estimate the leaf area (planimp for each date, and normalize transpiration by this result.")
+
+# -----------------------------
+# Parameters (replace as needed)
+# -----------------------------
+emergence_date <- 8   # DAS at emergence
+harvest_date   <- 43  # DAS at harvest
+
+# -----------------------------
+# Prepare leaf area data
+# -----------------------------
+LA_HARVEST <- allData$final_LA %>%
+  mutate(unit = paste0(TABLE, "_", POSITION)) %>%
+  arrange(unit)
+
+# -----------------------------
+# Compute slope per unit
+# -----------------------------
+LA_LINEAR_GROWTH <- LA_HARVEST %>%
+  mutate(Slope = LEAF_AREA / (harvest_date - emergence_date))
+
+# -----------------------------
+# Build leaf area estimation matrix
+# -----------------------------
+days <- emergence_date:harvest_date
+units <- LA_LINEAR_GROWTH$unit
+
+LEAF_AREA_ESTIM <- sapply(units, function(u) {
+  slope <- LA_LINEAR_GROWTH$Slope[LA_LINEAR_GROWTH$unit == u]
+  cumsum(c(0, rep(slope, length(days)-1)))  # first day = 0
+})
+
+colnames(LEAF_AREA_ESTIM) <- units
+rownames(LEAF_AREA_ESTIM) <- days
+
+# -----------------------------
+# Check last day vs measured
+# -----------------------------
+cat("Last day leaf area (estimated):\n")
+head(LEAF_AREA_ESTIM[nrow(LEAF_AREA_ESTIM), ])
+
+cat("Measured leaf area at harvest with planimeter:\n")
+head(LA_LINEAR_GROWTH$LEAF_AREA)
+
+save(LA_LINEAR_GROWTH, file =  paste(opPATH.obj,"LA_LINEAR_GROWTH.RData", sep = ""))
+load(paste(opPATH.obj,"LA_LINEAR_GROWTH.RData", sep = ""))
+
+
+
+LEAF_AREA_ESTIM=as.data.frame(LEAF_AREA_ESTIM)
+save(LEAF_AREA_ESTIM, file =  paste(opPATH.obj,"LEAF_AREA_ESTIM.RData", sep = ""))
+load(paste(opPATH.obj,"LEAF_AREA_ESTIM.RData", sep = ""))
+
+# ----------
+```
+
+
+```{r plot leaf area over time}
+print("plot leaf area per day")
+draw_leaf_area(data = LEAF_AREA_ESTIM)
+```
+
+###  Stage VIII : ETr non smooth normalized by leaf area over time
+
+
+```{r}
+
+load(paste(opPATH.obj,"ETr_Meta_ERRsec.rmvd.RData", sep = ""))
+
+# leaf area per interval
+LEAF_AREA_ESTIM$DAS = rownames(LEAF_AREA_ESTIM)
+LEAF_AREA_ESTIM$DAS = as.numeric(LEAF_AREA_ESTIM$DAS )
+LEAF_AREA_ESTIM <- LEAF_AREA_ESTIM %>%
+  relocate(DAS)
+
+
+```
+
+
+```{r define sowing  date}
+sowing <- readline(prompt = "Enter SOWING DATE  (required format: YYYY-MM-DD): ") # example  2025-04-28 
+sowing=as.Date(as.character(sowing)) 
+cat(paste0("the sowing date of the experiment is :",as.Date(as.character(sowing))))
+
+```
+
+
+```{r define harvest date}
+harvest <- readline(prompt = "Enter PLANIMETER DATE  (required format: YYYY-MM-DD): ") # example  2025-05-10
+harvest=as.Date(as.character(harvest)) 
+cat(paste0("the harvest date of the experiment is :",as.Date(as.character(harvest))))
+
+```
+```{r}
+LEAF_AREA_ESTIM$DATE <- sowing + as.numeric(LEAF_AREA_ESTIM$DAS)
+LEAF_AREA_ESTIM$DATE  = as.Date(LEAF_AREA_ESTIM$DATE )
+```
+
+###  Stage IX : Calcul ETr interpolated (non smoothed) normalized by Leaf area
+
+```{r}
+TS = colnames(ETr_Meta_ERRsec.rmvd)[7:ncol(ETr_Meta_ERRsec.rmvd )]
+TS <- as.POSIXct(TS, format = "%Y-%m-%d %H:%M:%S")
+
+df_LA_by_TS <- data.frame(
+  TS = TS,
+  DATE = as.Date(TS)
+)
+
+df_LA_by_TS <- merge(df_LA_by_TS, LEAF_AREA_ESTIM, by = "DATE", all.x = TRUE)
+rownames(df_LA_by_TS ) = df_LA_by_TS$TS
+
+df_LA_by_TS= as.data.frame(t(df_LA_by_TS))
+df_LA_by_TS= df_LA_by_TS[-c(1:3),] #remove DATE, TS, DAS 
+
+
+
+# come back to the good format with metadat and weather of ETr data
+
+
+df_LA_by_TS$unit = rownames(df_LA_by_TS)
+df_LA_by_TS <- df_LA_by_TS %>%
+  relocate(unit)
+
+df_LA_by_TS <- merge(metadata_ETr, df_LA_by_TS, by = "unit")
+
+metadata_ETr = ETr_Meta_ERRsec.rmvd[,1:6]
+
+weather_ETr = ETr_Meta_ERRsec.rmvd[1:8,] 
+
+ncol(weather_ETr)
+ncol(df_LA_by_TS)
+
+df_LA_by_TS = rbind(weather_ETr, df_LA_by_TS)
+
+df_LA_by_TS[9:nrow(df_LA_by_TS), ] <-
+  df_LA_by_TS[9:nrow(df_LA_by_TS), ] %>%
+  arrange(unit)
+
+
+ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), ] <-
+  ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), ] %>%
+  arrange(unit)
+
+nrow(df_LA_by_TS)
+nrow(ETr_Meta_ERRsec.rmvd)
+
+ncol(df_LA_by_TS)
+ncol(ETr_Meta_ERRsec.rmvd)
+
+save(df_LA_by_TS, file =  paste(opPATH.obj,"df_LA_by_TS.RData", sep = ""))
+
+mat_ETr <- ETr_Meta_ERRsec.rmvd[9:nrow(ETr_Meta_ERRsec.rmvd), 7:ncol(ETr_Meta_ERRsec.rmvd)] ## value of ETr and LA
+mat_LA  <- df_LA_by_TS[9:nrow(df_LA_by_TS), 7:ncol(df_LA_by_TS)]
+rownames(mat_ETr) = ETr_Meta_ERRsec.rmvd$unit[9:nrow(ETr_Meta_ERRsec.rmvd)]
+rownames(mat_LA) = df_LA_by_TS$unit[9:nrow(df_LA_by_TS)]
+
+
+mat_ETr <- as.matrix(mat_ETr)
+mat_LA  <- as.matrix(mat_LA)
+
+mode(mat_ETr) <- "numeric"
+mode(mat_LA)  <- "numeric"
+
+Etr_LA <- mat_ETr / mat_LA # normalized each position(row, column of ETr by LA)
+
+Etr_LA= as.data.frame(Etr_LA)
+
+
+Etr_LA
+
+
+
+# come back to the good format with metadat and weather of ETr data
+
+
+Etr_LA$unit = rownames(Etr_LA)
+Etr_LA <- Etr_LA %>%
+  relocate(unit)
+
+ETr_LA <- merge(metadata_ETr, Etr_LA, by = "unit")
+
+ETr_LA = rbind(weather_ETr, ETr_LA)
+
+
+save(ETr_LA, file =  paste(opPATH.obj,"ETr_LA.RData", sep = ""))
+load(paste(opPATH.obj,"ETr_LA.RData", sep = ""))
+
+```
+
+
+```{r profile}
+
+print("Plot  ETr profiles normalized by leaf area")
+ET_profile_output = suppressWarnings(draw_ETr_LA(data=ETr_LA))
+write.table(ETr_LA, paste0(opPATH,  "OP-ETr_LA.csv"), col.names = TRUE, row.names = FALSE, sep = ";", dec = ".")
+
+
+```
+
+###  --> Extraction of features on ETr profile  normalized by leaf area 
+
+```{r features of ETr smooth non normalized }
+unq.dts = unique(as.Date(colnames(ETr_LA[7:ncol(ETr_LA)])))
+
+featuresRES <- getFeatures_30min(x = ETr_LA)
+allFeatures <- featuresRES$allFeatures
+
+# create H2 dataframe to store H2 est. of each feature for each day
+F.He <- as.data.frame(matrix(NA, nrow = length(unq.dts), ncol = 15)) # Date-ROW, feature-COL
+
+ colnames(F.He) <- c("maxET", "slope.maxET.6", "slope.07maxET", "slope.00.07", "slope.19.2330", "curvmaxET", 
+                       "total.auc","auc.10.15", "sd.10.15", "auc.prop.10.15", "auc.07.19", "sd.07.19",  
+                       "auc.prop.07.19", "auc.night", "cos.sim.index")
+rownames(F.He) <- unq.dts
+
+featureHeRES <- getFeatureHe_30min(x = allFeatures, y = ETr_LA, d = unq.dts, p = opPATH.rawLA)
+write.csv(featureHeRES, paste0(opPATH.rawLA, "ETr_LA_featureH2.csv"))
+
+
+## Prepare data for 'each feature'
+maxET <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+slope.maxET.6 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+slope.07maxET <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+slope.00.07 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+slope.19.2330 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+curvmaxET <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+total.auc <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+auc.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+sd.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+auc.prop.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+auc.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+sd.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+auc.prop.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+auc.night <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+cos.sim.index <- as.data.frame(matrix(nr = (nrow(ETr_LA)-8), nc = length(unq.dts)))
+
+for (j in 1:(nrow(ETr_LA)-8)){
+  
+  for(d in 1:length(unq.dts))
+  {maxET[j, d] <- data.frame(allFeatures[[j]][d, 1])
+  slope.maxET.6[j, d] <- data.frame(allFeatures[[j]][d, 2])
+  slope.07maxET[j, d] <- data.frame(allFeatures[[j]][d, 3])
+  slope.00.07[j, d] <- data.frame(allFeatures[[j]][d, 4])
+  slope.19.2330[j, d] <- data.frame(allFeatures[[j]][d, 5])
+  
+  curvmaxET[j, d] <- data.frame(allFeatures[[j]][d, 6])
+  total.auc[j, d] <- data.frame(allFeatures[[j]][d, 7])
+  auc.10.15[j, d] <- data.frame(allFeatures[[j]][d, 8])
+  sd.10.15 [j, d] <- data.frame(allFeatures[[j]][d, 9])
+  auc.prop.10.15[j, d] <- data.frame(allFeatures[[j]][d, 10])
+  
+  auc.07.19[j, d] <- data.frame(allFeatures[[j]][d, 11])
+  sd.07.19[j, d] <- data.frame(allFeatures[[j]][d, 12])
+  auc.prop.07.19[j, d] <- data.frame(allFeatures[[j]][d, 13])
+  auc.night [j, d] <- data.frame(allFeatures[[j]][d, 14])
+  cos.sim.index[j, d] <- data.frame(allFeatures[[j]][d, 15])
+  }
+  
+} 
+
+names(maxET)=names(slope.maxET.6)=names(slope.07maxET)=names(slope.00.07)=names(slope.19.2330)<-unq.dts
+names(curvmaxET)=names(total.auc)=names(auc.10.15)=names(sd.10.15)=names(auc.prop.10.15)<-unq.dts
+names(auc.07.19)=names(sd.07.19)=names(auc.prop.07.19)=names(auc.night)=names(cos.sim.index)<-unq.dts
+
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], maxET)), 
+            file= paste0(opPATH.rawLA, "maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], slope.maxET.6)), 
+            paste0(opPATH.rawLA, "slope.maxET.6.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], slope.00.07)), 
+            paste0(opPATH.rawLA, "slope.00.07.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], slope.07maxET)), 
+            paste0(opPATH.rawLA, "slope.07maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], slope.19.2330)), 
+            paste0(opPATH.rawLA, "slope.19.2330.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], curvmaxET)), 
+            paste0(opPATH.rawLA, "curvmaxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], total.auc)), 
+            paste0(opPATH.rawLA, "total.auc.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], auc.10.15)), 
+            paste0(opPATH.rawLA, "auc.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], sd.10.15)), 
+            paste0(opPATH.rawLA, "sd.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], auc.prop.10.15)), 
+            paste0(opPATH.rawLA, "auc.prop.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], auc.07.19)), 
+            paste0(opPATH.rawLA, "auc.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], sd.07.19)), 
+            paste0(opPATH.rawLA, "sd.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], auc.prop.07.19)), 
+            paste0(opPATH.rawLA, "auc.prop.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], auc.night)), 
+            paste0(opPATH.rawLA, "auc.night.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_LA[9:nrow(ETr_LA), 1:6], cos.sim.index)), 
+            paste0(opPATH.rawLA, "cos.sim.index.csv"), dec = ".", sep = ";", row.names = F)
+```
+
+
+###  Stage X : Calcul ETr smooth  normalized by Leaf area
+
+
+```{r}
+load(file =  paste(opPATH.obj,"ETr_smth.RData", sep = ""))
+
+TS = colnames(ETr_smth)[7:ncol(ETr_smth )]
+TS <- as.POSIXct(TS, format = "%Y-%m-%d %H:%M:%S")
+
+df_LA_by_TS <- data.frame(
+  TS = TS,
+  DATE = as.Date(TS)
+)
+
+df_LA_by_TS <- merge(df_LA_by_TS, LEAF_AREA_ESTIM, by = "DATE", all.x = TRUE)
+rownames(df_LA_by_TS ) = df_LA_by_TS$TS
+
+df_LA_by_TS= as.data.frame(t(df_LA_by_TS))
+df_LA_by_TS= df_LA_by_TS[-c(1:3),] #remove DATE, TS, DAS 
+
+
+
+# come back to the good format with metadat and weather of ETr data
+metadata_ETr_smth = ETr_smth[,1:6]
+weather_ETr_smth = ETr_smth[1:8,] 
+
+df_LA_by_TS$unit = rownames(df_LA_by_TS)
+df_LA_by_TS <- df_LA_by_TS %>%
+  relocate(unit)
+
+df_LA_by_TS <- merge(metadata_ETr_smth, df_LA_by_TS, by = "unit")
+
+
+
+ncol(df_LA_by_TS)
+ncol(weather_ETr_smth)
+
+df_LA_by_TS = rbind(weather_ETr_smth, df_LA_by_TS)
+
+df_LA_by_TS[9:nrow(df_LA_by_TS), ] <-
+  df_LA_by_TS[9:nrow(df_LA_by_TS), ] %>%
+  arrange(unit)
+
+
+ETr_smth[9:nrow(ETr_smth), ] <-
+  ETr_smth[9:nrow(ETr_smth), ] %>%
+  arrange(unit)
+
+nrow(df_LA_by_TS)
+nrow(ETr_smth)
+
+ncol(df_LA_by_TS)
+ncol(ETr_smth)
+
+mat_smth_ETr <- ETr_smth[9:nrow(ETr_smth), 7:ncol(ETr_smth)] ## value of ETr and LA
+mat_LA  <- df_LA_by_TS[9:nrow(df_LA_by_TS), 7:ncol(df_LA_by_TS)]
+rownames(mat_ETr) = ETr_smth$unit[9:nrow(ETr_smth)]
+rownames(mat_LA) = df_LA_by_TS$unit[9:nrow(df_LA_by_TS)]
+
+
+mat_smth_ETr <- as.matrix(mat_smth_ETr)
+mat_LA  <- as.matrix(mat_LA)
+
+mode(mat_smth_ETr) <- "numeric"
+mode(mat_LA)  <- "numeric"
+
+Etr_smth_LA <- mat_smth_ETr / mat_LA # normalized each position(row, column of ETr by LA)
+
+ETr_smth_LA= as.data.frame(Etr_smth_LA)
+
+
+# come back to the good format with metadat and weather of ETr data
+
+
+ETr_smth_LA$unit = rownames(ETr_smth_LA)
+ETr_smth_LA <- ETr_smth_LA %>%
+  relocate(unit)
+
+ETr_smth_LA <- merge(metadata_ETr_smth, ETr_smth_LA, by = "unit")
+
+ETr_smth_LA = rbind(weather_ETr_smth, ETr_smth_LA)
+
+
+save(ETr_smth_LA, file =  paste(opPATH.obj,"ETr_smth_LA.RData", sep = ""))
+load(paste(opPATH.obj,"ETr_smth_LA.RData", sep = ""))
+
+```
+
+
+```{r profile}
+
+print("Plot  ETr profiles smoothed normalized by leaf area")
+ET_profile_output = suppressWarnings(draw_ETr_smth_LA(data=ETr_smth_LA))
+write.table(ETr_LA, paste0(opPATH,  "OP-ETr_smoothed_normalied_LA.csv"), col.names = TRUE, row.names = FALSE, sep = ";", dec = ".")
+
+
+```
+
+###  --> Extraction of features ETr smooth  normalized by leaf area
+
+```{r features  }
+load(paste(opPATH.obj,"ETr_smth_LA.RData", sep = ""))
+
+unq.dts = unique(as.Date(colnames(ETr_smth_LA[7:ncol(ETr_smth_LA)])))
+
+featuresRES <- getFeatures_30min(x = ETr_smth_LA)
+allFeatures <- featuresRES$allFeatures
+
+# create H2 dataframe to store H2 est. of each feature for each day
+F.He <- as.data.frame(matrix(NA, nrow = length(unq.dts), ncol = 15)) # Date-ROW, feature-COL
+
+ colnames(F.He) <- c("maxET", "slope.maxET.6", "slope.07maxET", "slope.00.07", "slope.19.2330", "curvmaxET", 
+                       "total.auc","auc.10.15", "sd.10.15", "auc.prop.10.15", "auc.07.19", "sd.07.19",  
+                       "auc.prop.07.19", "auc.night", "cos.sim.index")
+rownames(F.He) <- unq.dts
+
+featureHeRES <- getFeatureHe_30min(x = allFeatures, y = ETr_smth_LA, d = unq.dts, p = opPATH.smthLA)
+write.csv(featureHeRES, paste0(opPATH.smthLA, "ETr_smth_LA_featureH2.csv"))
+
+
+## Prepare data for 'each feature'
+maxET <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+slope.maxET.6 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+slope.07maxET <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+slope.00.07 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+slope.19.2330 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+curvmaxET <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+total.auc <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+auc.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+sd.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+auc.prop.10.15 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+auc.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+sd.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+auc.prop.07.19 <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+auc.night <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+cos.sim.index <- as.data.frame(matrix(nr = (nrow(ETr_smth_LA)-8), nc = length(unq.dts)))
+
+for (j in 1:(nrow(ETr_smth_LA)-8)){
+  
+  for(d in 1:length(unq.dts))
+  {maxET[j, d] <- data.frame(allFeatures[[j]][d, 1])
+  slope.maxET.6[j, d] <- data.frame(allFeatures[[j]][d, 2])
+  slope.07maxET[j, d] <- data.frame(allFeatures[[j]][d, 3])
+  slope.00.07[j, d] <- data.frame(allFeatures[[j]][d, 4])
+  slope.19.2330[j, d] <- data.frame(allFeatures[[j]][d, 5])
+  
+  curvmaxET[j, d] <- data.frame(allFeatures[[j]][d, 6])
+  total.auc[j, d] <- data.frame(allFeatures[[j]][d, 7])
+  auc.10.15[j, d] <- data.frame(allFeatures[[j]][d, 8])
+  sd.10.15 [j, d] <- data.frame(allFeatures[[j]][d, 9])
+  auc.prop.10.15[j, d] <- data.frame(allFeatures[[j]][d, 10])
+  
+  auc.07.19[j, d] <- data.frame(allFeatures[[j]][d, 11])
+  sd.07.19[j, d] <- data.frame(allFeatures[[j]][d, 12])
+  auc.prop.07.19[j, d] <- data.frame(allFeatures[[j]][d, 13])
+  auc.night [j, d] <- data.frame(allFeatures[[j]][d, 14])
+  cos.sim.index[j, d] <- data.frame(allFeatures[[j]][d, 15])
+  }
+  
+} 
+
+names(maxET)=names(slope.maxET.6)=names(slope.07maxET)=names(slope.00.07)=names(slope.19.2330)<-unq.dts
+names(curvmaxET)=names(total.auc)=names(auc.10.15)=names(sd.10.15)=names(auc.prop.10.15)<-unq.dts
+names(auc.07.19)=names(sd.07.19)=names(auc.prop.07.19)=names(auc.night)=names(cos.sim.index)<-unq.dts
+
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], maxET)), 
+            file= paste0(opPATH.smthLA, "maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], slope.maxET.6)), 
+            paste0(opPATH.smthLA, "slope.maxET.6.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], slope.00.07)), 
+            paste0(opPATH.smthLA, "slope.00.07.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], slope.07maxET)), 
+            paste0(opPATH.smthLA, "slope.07maxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], slope.19.2330)), 
+            paste0(opPATH.smthLA, "slope.19.2330.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], curvmaxET)), 
+            paste0(opPATH.smthLA, "curvmaxET.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], total.auc)), 
+            paste0(opPATH.smthLA, "total.auc.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], auc.10.15)), 
+            paste0(opPATH.smthLA, "auc.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], sd.10.15)), 
+            paste0(opPATH.smthLA, "sd.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], auc.prop.10.15)), 
+            paste0(opPATH.smthLA, "auc.prop.10.15.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], auc.07.19)), 
+            paste0(opPATH.smthLA, "auc.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], sd.07.19)), 
+            paste0(opPATH.smthLA, "sd.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], auc.prop.07.19)), 
+            paste0(opPATH.smthLA, "auc.prop.07.19.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], auc.night)), 
+            paste0(opPATH.smthLA, "auc.night.csv"), dec = ".", sep = ";", row.names = F)
+
+write.table(as.data.frame(cbind(ETr_smth_LA[9:nrow(ETr_smth_LA), 1:6], cos.sim.index)), 
+            paste0(opPATH.smthLA, "cos.sim.index.csv"), dec = ".", sep = ";", row.names = F)
+```
+
+
